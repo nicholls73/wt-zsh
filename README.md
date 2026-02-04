@@ -18,7 +18,7 @@ Git worktrees let you have multiple branches checked out simultaneously in separ
 ```zsh
 # 1. Download the script
 mkdir -p ~/.local/bin
-curl -sL https://raw.githubusercontent.com/YOUR_USERNAME/wt-zsh/main/wt > ~/.local/bin/wt
+curl -sL https://raw.githubusercontent.com/nicholls73/wt-zsh/main/wt > ~/.local/bin/wt
 chmod +x ~/.local/bin/wt
 
 # 2. Add to your ~/.zshrc (required for cd and tab completion)
