@@ -1,0 +1,851 @@
+#!/usr/bin/env zsh
+# Git Worktree Management 🌿
+# Professional git worktree management for parallel development workflows
+#
+# INSTALLATION:
+#   1. Install the script:
+#      mkdir -p ~/.local/bin
+#      curl -s https://gist.githubusercontent.com/wmjamesnicholls/2e9e9fee24d50594bf5b25c9c6c33150/raw/wt > ~/.local/bin/wt
+#      chmod +x ~/.local/bin/wt
+#
+#   2. Add wrapper function to ~/.zshrc (required for cd to work):
+#      eval "$(~/.local/bin/wt --init)"
+#
+#   3. Reload shell: source ~/.zshrc
+#
+# CONFIGURATION (optional environment variables):
+#   WT_BASE_DIR     - Base directory for worktrees (default: ~/.wt)
+#   WT_CLAUDE_FLAGS - Extra flags for Claude Code (default: none)
+#                     Set to "--dangerously-skip-permissions" to skip prompts
+#
+# USAGE:
+#   wt new <branch> [--from <ref>] [--claude|--cursor|--all|--none]
+#   wt switch <branch>              - Switch to existing worktree
+#   wt list                         - List all worktrees with status
+#   wt clean [--all]                - Clean up worktrees
+#   wt remove <branch>              - Remove specific worktree
+#   wt status                       - Show current worktree status
+#   wt help                         - Show detailed help
+
+set -e
+
+# Configuration
+WT_BASE_DIR="${WT_BASE_DIR:-$HOME/.wt}"
+WT_CLAUDE_FLAGS="${WT_CLAUDE_FLAGS:-}"
+
+# Internal: output cd instruction for wrapper function
+_wt_request_cd() {
+    echo "__WT_CD__:$1"
+}
+
+_wt_init() {
+    cat <<'INIT_EOF'
+# wt - Git Worktree Manager wrapper function
+# This wrapper enables directory changes to persist in your shell
+wt() {
+    local output
+    local exit_code
+    local cd_path
+
+    # Run the actual script and capture output
+    output=$("${WT_SCRIPT:-$HOME/.local/bin/wt}" "$@")
+    exit_code=$?
+
+    # Check for cd instruction in output
+    if [[ "$output" == *"__WT_CD__:"* ]]; then
+        # Extract and remove the cd instruction from output
+        cd_path=$(echo "$output" | grep "__WT_CD__:" | tail -1 | sed 's/__WT_CD__://')
+        output=$(echo "$output" | grep -v "__WT_CD__:")
+
+        # Print the rest of the output
+        [[ -n "$output" ]] && echo "$output"
+
+        # Perform the cd in the current shell
+        if [[ -n "$cd_path" && -d "$cd_path" ]]; then
+            cd "$cd_path"
+        fi
+    else
+        echo "$output"
+    fi
+
+    return $exit_code
+}
+
+# Tab completion for wt
+_wt_completions() {
+    local cur="${COMP_WORDS[COMP_CWORD]}"
+    local prev="${COMP_WORDS[COMP_CWORD-1]}"
+
+    case "$prev" in
+        wt)
+            COMPREPLY=($(compgen -W "new switch s list ls clean remove rm status st help h --claude --cursor --all" -- "$cur"))
+            ;;
+        switch|s|remove|rm)
+            # Complete with existing worktree branch names
+            local repo_name
+            if repo_name=$(basename "$(git rev-parse --show-toplevel 2>/dev/null)" 2>/dev/null); then
+                local wt_base="${WT_BASE_DIR:-$HOME/.wt}"
+                if [[ -d "$wt_base/$repo_name" ]]; then
+                    local branches=$(ls "$wt_base/$repo_name" 2>/dev/null)
+                    COMPREPLY=($(compgen -W "$branches main master" -- "$cur"))
+                fi
+            fi
+            ;;
+        new)
+            # No completion for new branch names
+            ;;
+        --from)
+            # Complete with git refs
+            local refs=$(git for-each-ref --format='%(refname:short)' 2>/dev/null)
+            COMPREPLY=($(compgen -W "$refs" -- "$cur"))
+            ;;
+    esac
+}
+
+# Zsh completion
+if [[ -n "$ZSH_VERSION" ]]; then
+    _wt_zsh_completions() {
+        local -a subcmds
+        subcmds=(
+            'new:Create new worktree'
+            'switch:Switch to existing worktree'
+            's:Switch to existing worktree (alias)'
+            'list:List all worktrees'
+            'ls:List all worktrees (alias)'
+            'clean:Clean up worktrees'
+            'remove:Remove specific worktree'
+            'rm:Remove specific worktree (alias)'
+            'status:Show current worktree status'
+            'st:Show status (alias)'
+            'help:Show help'
+            'h:Show help (alias)'
+        )
+
+        local -a branches
+        local repo_name wt_base
+
+        case "$words[2]" in
+            switch|s|remove|rm)
+                wt_base="${WT_BASE_DIR:-$HOME/.wt}"
+                if repo_name=$(basename "$(git rev-parse --show-toplevel 2>/dev/null)" 2>/dev/null); then
+                    if [[ -d "$wt_base/$repo_name" ]]; then
+                        branches=(${(f)"$(ls "$wt_base/$repo_name" 2>/dev/null)"} main master)
+                        _describe 'branch' branches
+                    fi
+                fi
+                ;;
+            new)
+                case "$words[CURRENT-1]" in
+                    --from)
+                        local -a refs
+                        refs=(${(f)"$(git for-each-ref --format='%(refname:short)' 2>/dev/null)"})
+                        _describe 'ref' refs
+                        ;;
+                    *)
+                        _message 'branch name'
+                        ;;
+                esac
+                ;;
+            *)
+                _describe 'subcommand' subcmds
+                ;;
+        esac
+    }
+    compdef _wt_zsh_completions wt
+fi
+INIT_EOF
+}
+
+_wt_help() {
+    cat <<EOF
+🌿 Git Worktree Manager
+
+USAGE:
+  wt <subcommand> [arguments]
+
+SUBCOMMANDS:
+  new <branch> [options]       Create new worktree
+    --from <ref>               Base worktree on ref (default: main/master)
+    --claude                   Launch Claude Code after creation
+    --cursor                   Launch Cursor after creation
+    --all                      Launch both Claude and Cursor
+    --none                     Don't launch any editor
+  switch, s <branch>           Switch to existing worktree
+  list, ls                     List all worktrees with status
+  clean [--all]                Clean up worktrees (--all includes all)
+  remove, rm <branch>          Remove specific worktree
+  status, st                   Show current worktree status
+  help, h                      Show this help message
+
+EDITOR OPTIONS:
+  --claude                     Launch Claude Code
+  --cursor                     Launch Cursor
+  --all                        Launch both editors
+
+CONFIGURATION:
+  WT_BASE_DIR                  Worktree base directory (default: ~/.wt)
+  WT_CLAUDE_FLAGS              Extra flags for Claude Code (e.g., --dangerously-skip-permissions)
+
+EXAMPLES:
+  wt new feature-auth          Create from default branch
+  wt new hotfix --from v1.0.0  Create from specific tag
+  wt new api-fix --claude      Create worktree and launch Claude Code
+  wt new ui-update --all       Create worktree and launch both editors
+  wt switch feature-auth       Switch to worktree
+  wt switch main               Switch back to main branch
+  wt remove api-fix            Remove specific worktree
+  wt status                    Show current status
+  wt --claude                  Launch Claude Code in current directory
+  wt --cursor                  Launch Cursor in current directory
+
+TIPS:
+  • Worktrees are created in \$WT_BASE_DIR/<repo-name>/<branch>
+  • Each worktree has its own node_modules
+  • Use 'wt clean' to remove all worktrees safely
+  • Add 'eval "\$(~/.local/bin/wt --init)"' to ~/.zshrc for cd support
+EOF
+}
+
+_wt_get_repo_root() {
+    local git_common_dir
+    git_common_dir=$(git rev-parse --git-common-dir 2>/dev/null) || return 1
+
+    if [[ "$git_common_dir" == */.git ]]; then
+        realpath "$(dirname "$git_common_dir")"
+        return 0
+    fi
+
+    local toplevel
+    toplevel=$(git rev-parse --show-toplevel 2>/dev/null) || return 1
+
+    if [[ -f "$toplevel/.git" ]]; then
+        local gitfile_content git_dir
+        gitfile_content=$(cat "$toplevel/.git")
+        if [[ "$gitfile_content" =~ gitdir:\ (.*) ]]; then
+            git_dir="${match[1]}"
+            if [[ "$git_dir" == */.git/worktrees/* ]]; then
+                realpath "${git_dir%/.git/worktrees/*}"
+                return 0
+            fi
+        fi
+    else
+        realpath "$toplevel"
+        return 0
+    fi
+
+    return 1
+}
+
+_wt_get_repo_name() {
+    local repo_root
+    repo_root=$(_wt_get_repo_root) || return 1
+    basename "$repo_root"
+}
+
+_wt_launch_claude() {
+    echo "Launching Claude Code..."
+    if [[ -n "$WT_CLAUDE_FLAGS" ]]; then
+        SHELL=$(which zsh) claude $WT_CLAUDE_FLAGS &
+    else
+        SHELL=$(which zsh) claude &
+    fi
+}
+
+_wt_new() {
+    if [[ $# -eq 0 ]]; then
+        echo "Usage: wt new <branch> [--from <ref>] [--claude|--cursor|--all|--none]"
+        return 1
+    fi
+
+    local branch_name="$1"
+    shift
+
+    local from_ref=""
+    local launch_claude=false
+    local launch_cursor=false
+    local launch_none=false
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --from)
+                from_ref="$2"
+                shift 2
+                ;;
+            --claude)
+                launch_claude=true
+                launch_cursor=false
+                launch_none=false
+                shift
+                ;;
+            --cursor)
+                launch_cursor=true
+                launch_claude=false
+                launch_none=false
+                shift
+                ;;
+            --all)
+                launch_claude=true
+                launch_cursor=true
+                launch_none=false
+                shift
+                ;;
+            --none)
+                launch_none=true
+                launch_claude=false
+                launch_cursor=false
+                shift
+                ;;
+            *)
+                echo "Error: Unknown option '$1'"
+                return 1
+                ;;
+        esac
+    done
+
+    if ! git rev-parse --git-dir >/dev/null 2>&1; then
+        echo "Error: Not in a git repository"
+        return 1
+    fi
+
+    local repo_root
+    repo_root=$(_wt_get_repo_root) || {
+        echo "Error: Could not determine repository root"
+        return 1
+    }
+
+    if [[ "$branch_name" == */* || "$branch_name" == *\ * ]]; then
+        echo "Error: Branch name should not contain slashes or spaces"
+        return 1
+    fi
+
+    if git show-ref --verify --quiet "refs/heads/$branch_name"; then
+        echo "Error: Branch '$branch_name' already exists"
+        echo "Tip: Use 'wt switch $branch_name' to switch to it"
+        return 1
+    fi
+
+    echo "Fetching latest changes from origin..."
+    if ! git fetch origin >/dev/null 2>&1; then
+        echo "⚠️  Warning: Could not fetch from origin, continuing with local state"
+    else
+        echo "✅ Fetched latest changes from origin"
+    fi
+
+    if [[ -z "$from_ref" ]]; then
+        local remote_head
+        remote_head=$(git symbolic-ref refs/remotes/origin/HEAD 2>/dev/null)
+        if [[ -n "$remote_head" ]]; then
+            from_ref="${remote_head#refs/remotes/}"
+        elif git show-ref --verify --quiet refs/heads/main; then
+            from_ref=main
+        elif git show-ref --verify --quiet refs/heads/master; then
+            from_ref=master
+        else
+            from_ref=HEAD
+        fi
+    fi
+
+    if ! git rev-parse --verify "$from_ref" >/dev/null 2>&1; then
+        echo "Error: Reference '$from_ref' does not exist"
+        return 1
+    fi
+
+    local repo_name
+    repo_name=$(_wt_get_repo_name) || {
+        echo "Error: Could not determine repository name"
+        return 1
+    }
+
+    local worktree_base_dir="$WT_BASE_DIR/$repo_name"
+    if [[ ! -d "$worktree_base_dir" ]]; then
+        mkdir -p "$worktree_base_dir"
+        echo "Created worktrees directory: $worktree_base_dir"
+    fi
+
+    local worktree_path="$worktree_base_dir/$branch_name"
+
+    if [[ -d "$worktree_path" ]]; then
+        echo "Error: Worktree directory already exists: $worktree_path"
+        return 1
+    fi
+
+    echo "Creating worktree from '$from_ref'..."
+    if git worktree add -b "$branch_name" "$worktree_path" "$from_ref"; then
+        echo "✅ Successfully created worktree and branch '$branch_name'"
+        echo "📍 Based on: $from_ref"
+        echo "📁 Location: $worktree_path"
+        echo "🌿 Branch: $branch_name"
+
+        # Change to the worktree directory for setup
+        cd "$worktree_path"
+
+        echo "Setting up remote tracking..."
+        if git show-ref --verify --quiet "refs/remotes/origin/$branch_name"; then
+            if git branch --set-upstream-to="origin/$branch_name" "$branch_name"; then
+                echo "✅ Branch will push to origin/$branch_name"
+            else
+                echo "⚠️  Warning: Failed to set upstream tracking for $branch_name"
+            fi
+        else
+            git config "branch.$branch_name.remote" origin
+            git config "branch.$branch_name.merge" "refs/heads/$branch_name"
+            echo "✅ Branch configured to push to origin/$branch_name (will create remote branch on first push)"
+        fi
+
+        if [[ -f "package.json" ]]; then
+            echo ""
+            if [[ -f "bun.lock" || -f "bun.lockb" || -f "bunfig.toml" ]]; then
+                echo "📦 Running bun install..."
+                if bun install; then
+                    echo "✅ Dependencies installed successfully"
+                else
+                    echo "⚠️  Warning: bun install failed"
+                fi
+            elif [[ -f "package-lock.json" ]]; then
+                echo "📦 Running npm install..."
+                if npm install; then
+                    echo "✅ Dependencies installed successfully"
+                else
+                    echo "⚠️  Warning: npm install failed"
+                fi
+            elif [[ -f "yarn.lock" ]]; then
+                echo "📦 Running yarn install..."
+                if yarn install; then
+                    echo "✅ Dependencies installed successfully"
+                else
+                    echo "⚠️  Warning: yarn install failed"
+                fi
+            elif [[ -f "pnpm-lock.yaml" ]]; then
+                echo "📦 Running pnpm install..."
+                if pnpm install; then
+                    echo "✅ Dependencies installed successfully"
+                else
+                    echo "⚠️  Warning: pnpm install failed"
+                fi
+            else
+                echo "📦 Running bun install (default)..."
+                if bun install; then
+                    echo "✅ Dependencies installed successfully"
+                else
+                    echo "⚠️  Warning: bun install failed"
+                fi
+            fi
+        fi
+
+        if [[ "$launch_none" == false ]]; then
+            if [[ "$launch_cursor" == true && "$launch_claude" == true ]]; then
+                echo ""
+                echo "Launching Cursor..."
+                SHELL=$(which zsh) cursor . &
+                _wt_launch_claude
+            elif [[ "$launch_cursor" == true ]]; then
+                echo ""
+                echo "Launching Cursor..."
+                SHELL=$(which zsh) cursor . &
+            elif [[ "$launch_claude" == true ]]; then
+                echo ""
+                _wt_launch_claude
+            fi
+        fi
+
+        # Request cd to worktree (will be handled by wrapper function)
+        _wt_request_cd "$worktree_path"
+    else
+        echo "Error: Failed to create worktree"
+        return 1
+    fi
+}
+
+_wt_switch() {
+    if [[ $# -eq 0 ]]; then
+        echo "Usage: wt switch <branch>"
+        return 1
+    fi
+
+    local branch_name="$1"
+
+    if ! git rev-parse --git-dir >/dev/null 2>&1; then
+        echo "Error: Not in a git repository"
+        return 1
+    fi
+
+    local repo_root
+    repo_root=$(_wt_get_repo_root) || {
+        echo "Error: Could not find git repository root"
+        return 1
+    }
+
+    if [[ "$branch_name" == "main" || "$branch_name" == "master" ]]; then
+        if git -C "$repo_root" checkout "$branch_name" --quiet 2>/dev/null; then
+            echo "✅ Switched to main repository"
+            echo "📁 Location: $repo_root"
+            echo "🌿 Branch: $branch_name"
+
+            local modified_count
+            modified_count=$(git -C "$repo_root" status --porcelain | wc -l | tr -d ' ')
+            if [[ $modified_count -gt 0 ]]; then
+                echo "📝 Modified files: $modified_count"
+            fi
+
+            _wt_request_cd "$repo_root"
+            return 0
+        else
+            echo "Error: Branch '$branch_name' does not exist in main repository"
+            return 1
+        fi
+    fi
+
+    local repo_name
+    repo_name=$(_wt_get_repo_name) || {
+        echo "Error: Could not determine repository name"
+        return 1
+    }
+
+    local worktree_path="$WT_BASE_DIR/$repo_name/$branch_name"
+
+    if [[ -d "$worktree_path" ]]; then
+        echo "✅ Switched to worktree: $branch_name"
+        echo "📁 Location: $worktree_path"
+        echo "🌿 Branch: $(git -C "$worktree_path" branch --show-current)"
+
+        local modified_count
+        modified_count=$(git -C "$worktree_path" status --porcelain | wc -l | tr -d ' ')
+        if [[ $modified_count -gt 0 ]]; then
+            echo "📝 Modified files: $modified_count"
+        fi
+
+        _wt_request_cd "$worktree_path"
+    else
+        echo "Error: Worktree not found: $worktree_path"
+        echo ""
+        echo "Available worktrees:"
+        _wt_list
+        return 1
+    fi
+}
+
+_wt_list() {
+    if ! git rev-parse --git-dir >/dev/null 2>&1; then
+        echo "Error: Not in a git repository"
+        return 1
+    fi
+
+    echo "📋 Git Worktrees:"
+    echo ""
+
+    local current_dir=$(pwd)
+    local repo_root
+    repo_root=$(_wt_get_repo_root)
+    local repo_name
+    repo_name=$(_wt_get_repo_name)
+
+    git worktree list --porcelain | while IFS= read -r line; do
+        if [[ "$line" =~ ^worktree\ (.+)$ ]]; then
+            local path="${match[1]}"
+            read -r line
+            [[ "$line" =~ ^HEAD\ (.+)$ ]]
+            local commit="${match[1]:0:7}"
+            read -r line
+            if [[ "$line" =~ ^branch\ refs/heads/(.+)$ ]]; then
+                local branch="${match[1]}"
+            else
+                local branch="(detached)"
+            fi
+
+            if [[ "$current_dir" == "$path" ]]; then
+                echo -n "→ "
+            else
+                echo -n "  "
+            fi
+
+            if [[ "$path" == "$WT_BASE_DIR/$repo_name/"* ]]; then
+                echo "🌿 $branch ($commit) - $path"
+            else
+                echo "🏠 $branch ($commit) - $path"
+            fi
+        fi
+    done
+}
+
+_wt_status() {
+    if ! git rev-parse --git-dir >/dev/null 2>&1; then
+        echo "Error: Not in a git repository"
+        return 1
+    fi
+
+    echo "📊 Current Worktree Status:"
+    echo ""
+
+    local current_branch=$(git branch --show-current)
+    local current_dir=$(pwd)
+
+    echo "📁 Location: $current_dir"
+    echo "🌿 Branch: $current_branch"
+
+    local repo_root
+    repo_root=$(_wt_get_repo_root) || {
+        echo "Error: Could not determine repository root"
+        return 1
+    }
+
+    local repo_name
+    repo_name=$(_wt_get_repo_name)
+
+    if [[ "$current_dir" == "$WT_BASE_DIR/$repo_name/"* ]]; then
+        echo "📍 Type: Worktree"
+    else
+        echo "📍 Type: Main repository"
+    fi
+
+    echo ""
+    local modified_count=$(git diff --name-only | wc -l | tr -d ' ')
+    local staged_count=$(git diff --cached --name-only | wc -l | tr -d ' ')
+    local untracked_count=$(git ls-files --others --exclude-standard | wc -l | tr -d ' ')
+
+    echo "📝 Changes:"
+    echo "  • Staged: $staged_count files"
+    echo "  • Modified: $modified_count files"
+    echo "  • Untracked: $untracked_count files"
+
+    local upstream
+    upstream=$(git rev-parse --abbrev-ref --symbolic-full-name @{u} 2>/dev/null)
+    if [[ -n "$upstream" ]]; then
+        local ahead_behind
+        ahead_behind=$(git rev-list --left-right --count "$upstream...HEAD" 2>/dev/null)
+        if [[ -n "$ahead_behind" ]]; then
+            local behind=$(echo "$ahead_behind" | cut -f1)
+            local ahead=$(echo "$ahead_behind" | cut -f2)
+            echo ""
+            echo "📊 Upstream: $upstream"
+            echo "  • Ahead: $ahead commits"
+            echo "  • Behind: $behind commits"
+        fi
+    fi
+}
+
+_wt_remove() {
+    if [[ $# -eq 0 ]]; then
+        echo "Usage: wt remove <branch>"
+        return 1
+    fi
+
+    local branch_name="$1"
+
+    if ! git rev-parse --git-dir >/dev/null 2>&1; then
+        echo "Error: Not in a git repository"
+        return 1
+    fi
+
+    local repo_root
+    repo_root=$(_wt_get_repo_root) || {
+        echo "Error: Could not find git repository root"
+        return 1
+    }
+
+    local repo_name
+    repo_name=$(_wt_get_repo_name) || {
+        echo "Error: Could not determine repository name"
+        return 1
+    }
+
+    local worktree_path="$WT_BASE_DIR/$repo_name/$branch_name"
+
+    if [[ ! -d "$worktree_path" ]]; then
+        echo "Error: Worktree not found: $worktree_path"
+        return 1
+    fi
+
+    local current_dir=$(pwd)
+    local needs_cd=false
+    if [[ "$current_dir" == "$worktree_path"* ]]; then
+        echo "⚠️  You are currently in the worktree you want to remove"
+        echo "📍 Will switch to main repository after removal..."
+        needs_cd=true
+    fi
+
+    echo "About to remove worktree:"
+    echo "  📁 Path: $worktree_path"
+    echo "  🌿 Branch: $branch_name"
+
+    read -q "?Remove this worktree? [y/N]: "
+    echo
+
+    if [[ $REPLY == "y" ]]; then
+        if git worktree remove "$worktree_path" --force; then
+            echo "✅ Successfully removed worktree: $branch_name"
+
+            read -q "?Also delete the branch '$branch_name'? [y/N]: "
+            echo
+            if [[ $REPLY == "y" ]]; then
+                if git branch -D "$branch_name"; then
+                    echo "✅ Successfully deleted branch: $branch_name"
+                else
+                    echo "⚠️  Failed to delete branch: $branch_name"
+                fi
+            fi
+
+            if [[ "$needs_cd" == true ]]; then
+                echo "📁 Returning to repository root: $repo_root"
+                _wt_request_cd "$repo_root"
+            fi
+        else
+            echo "❌ Failed to remove worktree"
+            return 1
+        fi
+    else
+        echo "Removal cancelled"
+    fi
+}
+
+_wt_clean() {
+    if ! git rev-parse --git-dir >/dev/null 2>&1; then
+        echo "Error: Not in a git repository"
+        return 1
+    fi
+
+    local repo_root
+    repo_root=$(_wt_get_repo_root) || {
+        echo "Error: Could not determine repository root"
+        return 1
+    }
+
+    local repo_root_normalized=$(realpath "$repo_root" 2>/dev/null || echo "$repo_root")
+
+    local include_all=0
+    if [[ "$1" == "--all" ]]; then
+        include_all=1
+    fi
+
+    local repo_name
+    repo_name=$(_wt_get_repo_name)
+
+    local current_dir=$(pwd)
+    local needs_cd=false
+
+    git worktree list --porcelain | while IFS= read -r line; do
+        if [[ "$line" =~ ^worktree\ (.+)$ ]]; then
+            local current_worktree="${match[1]}"
+            local current_worktree_normalized=$(realpath "$current_worktree" 2>/dev/null || echo "$current_worktree")
+
+            if [[ $include_all -eq 1 ]]; then
+                if [[ "$current_worktree_normalized" != "$repo_root_normalized" ]]; then
+                    echo "$current_worktree"
+                fi
+            else
+                if [[ "$current_worktree" == "$WT_BASE_DIR/$repo_name/"* ]]; then
+                    echo "$current_worktree"
+                fi
+            fi
+        fi
+    done | {
+        local -a worktrees
+        while IFS= read -r wt; do
+            worktrees+=("$wt")
+        done
+
+        if [[ ${#worktrees[@]} -eq 0 ]]; then
+            echo "No worktrees found to clean up"
+            if [[ $include_all -eq 0 ]]; then
+                echo "Tip: Use 'wt clean --all' to include all worktrees"
+            fi
+            return 0
+        fi
+
+        echo "Found ${#worktrees[@]} worktree(s) to remove:"
+        for wt in "${worktrees[@]}"; do
+            echo "  📁 $wt"
+            if [[ "$current_dir" == "$wt"* ]]; then
+                needs_cd=true
+            fi
+        done
+
+        read -q "?Remove all these worktrees? [y/N]: "
+        echo
+
+        if [[ $REPLY == "y" ]]; then
+            local removed_count=0
+            local failed_count=0
+
+            for wt in "${worktrees[@]}"; do
+                echo "Removing worktree: $wt"
+                if git worktree remove "$wt" --force; then
+                    echo "✅ Removed worktree: $wt"
+                    ((removed_count++))
+                else
+                    echo "⚠️  Failed to remove worktree: $wt"
+                    ((failed_count++))
+                fi
+            done
+
+            echo ""
+            echo "Summary:"
+            echo "  ✅ Successfully removed: $removed_count worktree(s)"
+            if [[ $failed_count -gt 0 ]]; then
+                echo "  ❌ Failed to remove: $failed_count worktree(s)"
+            fi
+
+            echo ""
+            echo "📁 Returning to repository root: $repo_root"
+            _wt_request_cd "$repo_root"
+        else
+            echo "Cleanup cancelled"
+        fi
+    }
+}
+
+# Main command dispatcher
+main() {
+    if [[ $# -eq 0 ]]; then
+        _wt_help
+        return 1
+    fi
+
+    local subcommand="$1"
+    shift
+
+    case "$subcommand" in
+        --init)
+            _wt_init
+            ;;
+        new)
+            _wt_new "$@"
+            ;;
+        switch|s)
+            _wt_switch "$@"
+            ;;
+        list|ls)
+            _wt_list "$@"
+            ;;
+        clean)
+            _wt_clean "$@"
+            ;;
+        remove|rm)
+            _wt_remove "$@"
+            ;;
+        status|st)
+            _wt_status
+            ;;
+        help|h)
+            _wt_help
+            ;;
+        --claude)
+            _wt_launch_claude
+            ;;
+        --cursor)
+            echo "Launching Cursor..."
+            SHELL=$(which zsh) cursor . &
+            ;;
+        --all)
+            echo "Launching Cursor..."
+            SHELL=$(which zsh) cursor . &
+            _wt_launch_claude
+            ;;
+        *)
+            echo "Error: Unknown subcommand '$subcommand'"
+            echo "Run 'wt help' for usage information"
+            return 1
+            ;;
+    esac
+}
+
+main "$@"
