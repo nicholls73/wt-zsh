@@ -333,7 +333,7 @@ _wt_new() {
 
     if [[ -z "$from_ref" ]]; then
         local remote_head
-        remote_head=$(git symbolic-ref refs/remotes/origin/HEAD 2>/dev/null)
+        remote_head=$(git symbolic-ref refs/remotes/origin/HEAD 2>/dev/null) || true
         if [[ -n "$remote_head" ]]; then
             from_ref="${remote_head#refs/remotes/}"
         elif git show-ref --verify --quiet refs/heads/main; then
@@ -539,29 +539,30 @@ _wt_list() {
     local repo_name
     repo_name=$(_wt_get_repo_name)
 
+    local wt_path wt_commit wt_branch
     git worktree list --porcelain | while IFS= read -r line; do
         if [[ "$line" =~ ^worktree\ (.+)$ ]]; then
-            local path="${match[1]}"
+            wt_path="${match[1]}"
             read -r line
             [[ "$line" =~ ^HEAD\ (.+)$ ]]
-            local commit="${match[1]:0:7}"
+            wt_commit="${match[1]:0:7}"
             read -r line
             if [[ "$line" =~ ^branch\ refs/heads/(.+)$ ]]; then
-                local branch="${match[1]}"
+                wt_branch="${match[1]}"
             else
-                local branch="(detached)"
+                wt_branch="(detached)"
             fi
 
-            if [[ "$current_dir" == "$path" ]]; then
+            if [[ "$current_dir" == "$wt_path" ]]; then
                 echo -n "→ "
             else
                 echo -n "  "
             fi
 
-            if [[ "$path" == "$WT_BASE_DIR/$repo_name/"* ]]; then
-                echo "🌿 $branch ($commit) - $path"
+            if [[ "$wt_path" == "$WT_BASE_DIR/$repo_name/"* ]]; then
+                echo "🌿 $wt_branch ($wt_commit) - $wt_path"
             else
-                echo "🏠 $branch ($commit) - $path"
+                echo "🏠 $wt_branch ($wt_commit) - $wt_path"
             fi
         fi
     done
